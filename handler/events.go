@@ -24,6 +24,11 @@ type CreateEventRequest struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
+type StatsResponse struct {
+	Type  string `json:"type"`
+	Count int    `json:"count"`
+}
+
 func (h *EventsHandler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 	var req CreateEventRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -97,14 +102,14 @@ func (h *EventsHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 		args = append(args, eventType)
 	}
 
-	fromRaw := queryParams.Get("from")
-	toRaw := queryParams.Get("to")
+	startRaw := queryParams.Get("start")
+	endRaw := queryParams.Get("end")
 	limit := utils.ParseIntWithFallback(queryParams.Get("limit"), 50)
 	offset := utils.ParseIntWithFallback(queryParams.Get("offset"), 0)
 
-	from, to, validTimeFilter, err := resolveTimeFilter(fromRaw, toRaw)
+	start, end, validTimeFilter, err := resolveTimeFilter(startRaw, endRaw)
 	if err != nil {
-		log.Warn("invalid list events time filter", "from", fromRaw, "to", toRaw, "err", err)
+		log.Warn("invalid list events time filter", "from", startRaw, "to", endRaw, "err", err)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -112,8 +117,8 @@ func (h *EventsHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 	if validTimeFilter {
 		where = append(where, "timestamp >= ?", "timestamp <= ?")
 		args = append(args,
-			from.UTC().Format(time.DateTime),
-			to.UTC().Format(time.DateTime),
+			start.UTC().Format(time.DateTime),
+			end.UTC().Format(time.DateTime),
 		)
 	}
 
@@ -181,40 +186,105 @@ func (h *EventsHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Info("events listed", "count", len(events), "type", eventType, "limit", limit, "offset", offset)
+	log.Info("events listed", "count", len(events), "type", eventType, "limit", limit, "offset", offset, "start", start.String(), "end", end.String())
 }
 
 func (h *EventsHandler) EventsStats(w http.ResponseWriter, r *http.Request) {
+	args := []any{}
+	where := []string{"1=1"}
 
+	queryParams := r.URL.Query()
+	startRaw := queryParams.Get("start")
+	endRaw := queryParams.Get("end")
+
+	start, end, validTimeFilter, err := resolveTimeFilter(startRaw, endRaw)
+	if err != nil {
+		log.Warn("invalid events stats time filter", "from", startRaw, "to", endRaw, "err", err)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if validTimeFilter {
+		where = append(where, "timestamp >= ?", "timestamp <= ?")
+		args = append(args,
+			start.UTC().Format(time.DateTime),
+			end.UTC().Format(time.DateTime),
+		)
+	}
+
+	query := `
+		SELECT type, COUNT(*)
+		FROM events
+		WHERE ` + strings.Join(where, " AND ") + `
+		GROUP BY type
+	`
+
+	rows, err := h.DB.Query(query, args...)
+	if err != nil {
+		log.Error("failed to query events stats", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to query events stats")
+		return
+	}
+	defer rows.Close()
+
+	var stats []StatsResponse
+
+	for rows.Next() {
+		var stat StatsResponse
+		if err := rows.Scan(&stat.Type, &stat.Count); err != nil {
+			log.Error("failed to scan events stats row", "err", err)
+			writeError(w, http.StatusInternalServerError, "failed to read events stats data")
+			return
+		}
+		stats = append(stats, stat)
+	}
+
+	if err := rows.Err(); err != nil {
+		log.Error("failed while iterating events stats rows", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed while reading events stats")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"total": len(stats),
+		"data":  stats,
+	}); err != nil {
+		log.Error("failed to encode events stats response", "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to encode response")
+		return
+	}
+
+	log.Info("events stats retrieved", "count", len(stats), "start", start.String(), "end", end.String())
 }
 
-func resolveTimeFilter(fromRaw, toRaw string) (time.Time, time.Time, bool, error) {
-	if fromRaw == "" {
-		// ASSUMPTION: If only "to" is provided, time filtering is intentionally ignored.
+func resolveTimeFilter(startRaw, endRaw string) (time.Time, time.Time, bool, error) {
+	if startRaw == "" {
+		// ASSUMPTION: If only "end" is provided, time filtering is intentionally ignored.
 		return time.Time{}, time.Time{}, false, nil
 	}
 
-	from, err := time.Parse(apiTimeLayout, fromRaw)
+	start, err := time.Parse(apiTimeLayout, startRaw)
 	if err != nil {
-		return time.Time{}, time.Time{}, false, errors.New("invalid from date, expected RFC3339")
+		return time.Time{}, time.Time{}, false, errors.New("invalid start date, expected RFC3339")
 	}
 
-	var to time.Time
-	if toRaw == "" {
-		to = time.Now().UTC()
+	var end time.Time
+	if endRaw == "" {
+		end = time.Now().UTC()
 	} else {
-		// ASSUMPTION: If only "from" is provided, "to" is set to the current time.
-		to, err = time.Parse(apiTimeLayout, toRaw)
+		// ASSUMPTION: If only "start" is provided, "end" is set to the current time.
+		end, err = time.Parse(apiTimeLayout, endRaw)
 		if err != nil {
-			return time.Time{}, time.Time{}, false, errors.New("invalid to date, expected RFC3339")
+			return time.Time{}, time.Time{}, false, errors.New("invalid end date, expected RFC3339")
 		}
 	}
 
-	if !from.Before(to) {
-		return time.Time{}, time.Time{}, false, errors.New("invalid time filter: from must be before to")
+	if !start.Before(end) {
+		return time.Time{}, time.Time{}, false, errors.New("invalid time filter: start must be before end")
 	}
 
-	return from, to, true, nil
+	return start, end, true, nil
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

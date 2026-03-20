@@ -5,16 +5,17 @@ info:
 
 http:
   method: GET
-  url: http://localhost:8080/events?type=test.event&from=2026-03-16T10:30:00Z
+  url: http://localhost:8080/events?start=2026-03-16T10:30:00Z
   params:
     - name: type
       value: test.event
       type: query
-    - name: from
+      disabled: true
+    - name: start
       value: 2026-03-16T10:30:00Z
       type: query
-    - name: to
-      value: 2026-03-19T10:30:00Z
+    - name: end
+      value: 2026-03-20T10:30:00Z
       type: query
       disabled: true
     - name: limit
