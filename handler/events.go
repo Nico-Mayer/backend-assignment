@@ -1,0 +1,205 @@
+package handler
+
+import (
+	"backend/model"
+	"backend/utils"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+)
+
+const apiTimeLayout = time.RFC3339
+
+type EventsHandler struct {
+	DB *sql.DB
+}
+
+type CreateEventRequest struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+func (h *EventsHandler) CreateEvent(w http.ResponseWriter, r *http.Request) {
+	var req CreateEventRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "failed to parse request body")
+		return
+	}
+
+	if strings.TrimSpace(req.Type) == "" {
+		writeError(w, http.StatusBadRequest, "type is required")
+		return
+	}
+
+	if len(req.Payload) == 0 || !json.Valid(req.Payload) {
+		writeError(w, http.StatusBadRequest, "payload must be valid json")
+		return
+	}
+
+	const dedupeQuery = `
+		SELECT EXISTS(
+			SELECT 1
+			FROM events
+			WHERE type = ?
+				AND payload = ?
+				AND timestamp >= datetime('now', '-5 minutes')
+			LIMIT 1
+		)
+	`
+
+	var exists int
+	if err := h.DB.QueryRow(dedupeQuery, req.Type, string(req.Payload)).Scan(&exists); err != nil {
+		writeError(w, http.StatusConflict, "failed to check duplicate event")
+		return
+	}
+
+	if exists == 1 {
+		writeError(w, http.StatusConflict, "duplicate event within last 5 minutes")
+		return
+	}
+
+	const insertQuery = `
+		INSERT INTO events(type, payload, timestamp)
+		VALUES(?, ?, datetime('now'))
+	`
+
+	if _, err := h.DB.Exec(insertQuery, req.Type, string(req.Payload)); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create event")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_, _ = w.Write([]byte(`{"status":"created","message":"event created"}`))
+}
+
+func (h *EventsHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
+	queryParams := r.URL.Query()
+	where := []string{"1=1"}
+	args := []any{}
+
+	eventType := strings.TrimSpace(queryParams.Get("type"))
+	if eventType != "" {
+		where = append(where, "type = ?")
+		args = append(args, eventType)
+	}
+
+	fromRaw := queryParams.Get("from")
+	toRaw := queryParams.Get("to")
+	limit := utils.ParseIntWithFallback(queryParams.Get("limit"), 50)
+	offset := utils.ParseIntWithFallback(queryParams.Get("offset"), 0)
+
+	from, to, validTimeFilter, err := resolveTimeFilter(fromRaw, toRaw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if validTimeFilter {
+		where = append(where, "timestamp >= ?", "timestamp <= ?")
+		args = append(args,
+			from.UTC().Format(time.DateTime),
+			to.UTC().Format(time.DateTime),
+		)
+	}
+
+	query := `
+    	SELECT id, type, payload, timestamp
+    	FROM events
+    	WHERE ` + strings.Join(where, " AND ") + `
+    	ORDER BY timestamp DESC
+    	LIMIT ? OFFSET ?
+	`
+	args = append(args, limit, offset)
+
+	rows, err := h.DB.Query(query, args...)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list events")
+		return
+	}
+	defer rows.Close()
+
+	var events []model.Event
+
+	for rows.Next() {
+		var event model.Event
+		var payloadText string
+		var timestampText string
+
+		if err := rows.Scan(&event.ID, &event.Type, &payloadText, &timestampText); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read event data")
+			return
+		}
+
+		event.Payload = json.RawMessage(payloadText)
+		if !json.Valid(event.Payload) {
+			writeError(w, http.StatusInternalServerError, "stored payload is not valid json")
+			return
+		}
+
+		ts, err := time.Parse(apiTimeLayout, timestampText)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "invalid stored timestamp format")
+			return
+		}
+		event.Timestamp = ts.Unix()
+
+		events = append(events, event)
+	}
+
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed while reading events")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"total": len(events),
+		"data":  events,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to encode response")
+		return
+	}
+}
+
+func (h *EventsHandler) EventsStats(w http.ResponseWriter, r *http.Request) {
+
+}
+
+func resolveTimeFilter(fromRaw, toRaw string) (time.Time, time.Time, bool, error) {
+	if fromRaw == "" {
+		// ASSUMPTION: If only "to" is provided, time filtering is intentionally ignored.
+		return time.Time{}, time.Time{}, false, nil
+	}
+
+	from, err := time.Parse(apiTimeLayout, fromRaw)
+	if err != nil {
+		return time.Time{}, time.Time{}, false, errors.New("invalid from date, expected RFC3339")
+	}
+
+	var to time.Time
+	if toRaw == "" {
+		to = time.Now().UTC()
+	} else {
+		// ASSUMPTION: If only "from" is provided, "to" is set to the current time.
+		to, err = time.Parse(apiTimeLayout, toRaw)
+		if err != nil {
+			return time.Time{}, time.Time{}, false, errors.New("invalid to date, expected RFC3339")
+		}
+	}
+
+	if !from.Before(to) {
+		return time.Time{}, time.Time{}, false, errors.New("invalid time filter: from must be before to")
+	}
+
+	return from, to, true, nil
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(`{"message":"` + msg + `"}`))
+}

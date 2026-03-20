@@ -28,7 +28,7 @@ func OpenAndMigrate(fileName string) (*sql.DB, error) {
 }
 
 func migrate(db *sql.DB) error {
-	const statement = `
+	const query = `
 		CREATE TABLE IF NOT EXISTS events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			type TEXT NOT NULL,
@@ -41,6 +41,6 @@ func migrate(db *sql.DB) error {
 		CREATE INDEX IF NOT EXISTS idx_events_type_payload_timestamp ON events(type, payload, timestamp);
 	`
 
-	_, err := db.Exec(statement)
+	_, err := db.Exec(query)
 	return err
 }
