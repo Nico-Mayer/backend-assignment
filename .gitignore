@@ -1,1 +1,5 @@
+# Ignore database files
 *.db
+
+# OS files
+.DS_Store
