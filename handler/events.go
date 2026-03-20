@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/log"
 )
 
 const apiTimeLayout = time.RFC3339
@@ -25,16 +27,19 @@ type CreateEventRequest struct {
 func (h *EventsHandler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 	var req CreateEventRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Warn("invalid create event request body", "err", err)
 		writeError(w, http.StatusBadRequest, "failed to parse request body")
 		return
 	}
 
 	if strings.TrimSpace(req.Type) == "" {
+		log.Warn("create event validation failed", "reason", "missing type")
 		writeError(w, http.StatusBadRequest, "type is required")
 		return
 	}
 
 	if len(req.Payload) == 0 || !json.Valid(req.Payload) {
+		log.Warn("create event validation failed", "reason", "invalid payload")
 		writeError(w, http.StatusBadRequest, "payload must be valid json")
 		return
 	}
@@ -52,11 +57,13 @@ func (h *EventsHandler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 
 	var exists int
 	if err := h.DB.QueryRow(dedupeQuery, req.Type, string(req.Payload)).Scan(&exists); err != nil {
+		log.Error("failed to check duplicate event", "type", req.Type, "err", err)
 		writeError(w, http.StatusConflict, "failed to check duplicate event")
 		return
 	}
 
 	if exists == 1 {
+		log.Info("duplicate event rejected", "type", req.Type)
 		writeError(w, http.StatusConflict, "duplicate event within last 5 minutes")
 		return
 	}
@@ -67,9 +74,12 @@ func (h *EventsHandler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 	`
 
 	if _, err := h.DB.Exec(insertQuery, req.Type, string(req.Payload)); err != nil {
+		log.Error("failed to create event", "type", req.Type, "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to create event")
 		return
 	}
+
+	log.Info("event created", "type", req.Type)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -94,6 +104,7 @@ func (h *EventsHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 
 	from, to, validTimeFilter, err := resolveTimeFilter(fromRaw, toRaw)
 	if err != nil {
+		log.Warn("invalid list events time filter", "from", fromRaw, "to", toRaw, "err", err)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -117,6 +128,7 @@ func (h *EventsHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.DB.Query(query, args...)
 	if err != nil {
+		log.Error("failed to list events", "type", eventType, "limit", limit, "offset", offset, "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to list events")
 		return
 	}
@@ -130,18 +142,21 @@ func (h *EventsHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 		var timestampText string
 
 		if err := rows.Scan(&event.ID, &event.Type, &payloadText, &timestampText); err != nil {
+			log.Error("failed to scan event row", "err", err)
 			writeError(w, http.StatusInternalServerError, "failed to read event data")
 			return
 		}
 
 		event.Payload = json.RawMessage(payloadText)
 		if !json.Valid(event.Payload) {
+			log.Error("invalid json payload stored in database", "event_id", event.ID)
 			writeError(w, http.StatusInternalServerError, "stored payload is not valid json")
 			return
 		}
 
 		ts, err := time.Parse(apiTimeLayout, timestampText)
 		if err != nil {
+			log.Error("invalid timestamp format stored in database", "event_id", event.ID, "value", timestampText, "err", err)
 			writeError(w, http.StatusInternalServerError, "invalid stored timestamp format")
 			return
 		}
@@ -151,6 +166,7 @@ func (h *EventsHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := rows.Err(); err != nil {
+		log.Error("failed while iterating event rows", "err", err)
 		writeError(w, http.StatusInternalServerError, "failed while reading events")
 		return
 	}
@@ -160,9 +176,12 @@ func (h *EventsHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 		"total": len(events),
 		"data":  events,
 	}); err != nil {
+		log.Error("failed to encode list events response", "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to encode response")
 		return
 	}
+
+	log.Info("events listed", "count", len(events), "type", eventType, "limit", limit, "offset", offset)
 }
 
 func (h *EventsHandler) EventsStats(w http.ResponseWriter, r *http.Request) {

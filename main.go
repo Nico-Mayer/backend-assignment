@@ -3,14 +3,18 @@ package main
 import (
 	"backend/db"
 	"backend/handler"
-	"log"
 	"net/http"
+
+	"github.com/charmbracelet/log"
 )
 
 func main() {
+	log.SetLevel(log.InfoLevel)
+
 	database, err := db.OpenAndMigrate("event-log.db")
 	if err != nil {
-		log.Fatal(err)
+		log.Error("database initialization failed", "err", err)
+		return
 	}
 	defer database.Close()
 
@@ -21,8 +25,8 @@ func main() {
 	mux.HandleFunc("GET /events", eventsHandler.ListEvents)
 	mux.HandleFunc("GET /events/stats", eventsHandler.EventsStats)
 
-	log.Println("Server starting on http://localhost:8080")
+	log.Info("server starting", "addr", "http://localhost:8080")
 	if err := http.ListenAndServe(":8080", mux); err != nil {
-		log.Fatal(err)
+		log.Error("server stopped", "err", err)
 	}
 }
