@@ -52,12 +52,21 @@ Please fill these out before submitting.
 
 ### 1. What trade-offs did you make and why?
 
-_Your answer here_
+1. Deduplication works with sql query instead of local in memory cache witch adds unessesary db querys but it was faster to implement it this way for now.
+2. I used untyped response json for the endpoint, also to make development faster for now.
 
 ### 2. If this needed to handle 10,000 events per second, what would you change?
 
-_Your answer here_
+1. Swap sqlite with a better horizontal scalable DB like postgres for example
+2. Deduplication via in memmory cache.
+3. Maybe use some sort of batch inserts and only query the db if the batch size is reached or after a timeout.
 
 ### 3. What's one thing you'd add or refactor given another few hours?
 
-_Your answer here_
+1. Add better logging middleware
+2. Add request validation middleware and consistent error response format.
+3. Add a OpenApi spec
+4. Add better Deduplication logic
+5. Improve the tests so they also cover the events/stats endpoint
+6. Maybe add a ORM to reduce raw sql querys
+7. Improve type safty for the endpoints
