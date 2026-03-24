@@ -12,13 +12,13 @@ import (
 )
 
 type listEventsResponse struct {
-	Total int `json:"total"`
-	Data  []struct {
+	Data []struct {
 		ID        int             `json:"id"`
 		Type      string          `json:"type"`
 		Payload   json.RawMessage `json:"payload"`
 		Timestamp int64           `json:"timestamp"`
 	} `json:"data"`
+	HasMore bool `json:"has_more"`
 }
 
 func newTestServer(t *testing.T) *httptest.Server {
@@ -82,8 +82,8 @@ func TestCreateAndListEvents_HappyPath(t *testing.T) {
 		t.Fatalf("failed to decode list response: %v", err)
 	}
 
-	if got.Total != 1 {
-		t.Fatalf("expected total 1, got %d", got.Total)
+	if got.HasMore {
+		t.Fatalf("expected has_more false, got true")
 	}
 
 	if len(got.Data) != 1 {

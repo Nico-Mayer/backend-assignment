@@ -24,7 +24,7 @@ type CreateEventRequest struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-type StatsResponse struct {
+type EventTypeStats struct {
 	Type  string `json:"type"`
 	Count int    `json:"count"`
 }
@@ -129,7 +129,7 @@ func (h *EventsHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
     	ORDER BY timestamp DESC
     	LIMIT ? OFFSET ?
 	`
-	args = append(args, limit, offset)
+	args = append(args, limit+1, offset) // limit+1 is used to check if there are more records so we dont need to query a second time for count
 
 	rows, err := h.DB.Query(query, args...)
 	if err != nil {
@@ -176,17 +176,22 @@ func (h *EventsHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	hasMore := len(events) > limit
+	if hasMore {
+		events = events[:limit]
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]any{
-		"total": len(events),
-		"data":  events,
+		"has_more": hasMore,
+		"data":     events,
 	}); err != nil {
 		log.Error("failed to encode list events response", "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to encode response")
 		return
 	}
 
-	log.Info("events listed", "count", len(events), "type", eventType, "limit", limit, "offset", offset, "start", start.String(), "end", end.String())
+	log.Info("events listed", "type", eventType, "limit", limit, "offset", offset, "start", start.String(), "end", end.String(), "has_more", hasMore)
 }
 
 func (h *EventsHandler) EventsStats(w http.ResponseWriter, r *http.Request) {
@@ -227,10 +232,10 @@ func (h *EventsHandler) EventsStats(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var stats []StatsResponse
+	var stats []EventTypeStats
 
 	for rows.Next() {
-		var stat StatsResponse
+		var stat EventTypeStats
 		if err := rows.Scan(&stat.Type, &stat.Count); err != nil {
 			log.Error("failed to scan events stats row", "err", err)
 			writeError(w, http.StatusInternalServerError, "failed to read events stats data")
@@ -247,8 +252,7 @@ func (h *EventsHandler) EventsStats(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]any{
-		"total": len(stats),
-		"data":  stats,
+		"data": stats,
 	}); err != nil {
 		log.Error("failed to encode events stats response", "err", err)
 		writeError(w, http.StatusInternalServerError, "failed to encode response")
